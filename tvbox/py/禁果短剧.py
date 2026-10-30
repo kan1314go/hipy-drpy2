@@ -26,7 +26,7 @@ except ImportError:
         def delCache(self, key):
             return "fail"
 
-def format_remarks(brand="ZakaTV", meta=""):
+def format_remarks(brand="蝴蝶影视", meta=""):
     clean_meta = str(meta or "").strip()
     clean_meta = re.sub(r"[\r\n\t]+", " ", clean_meta).strip()
     if clean_meta:
@@ -39,10 +39,10 @@ class Spider(SpiderBase):
         self.siteName = "禁果短剧"
         self.siteUrl = "https://jinguoduanju.app"
         self.apiBase = "https://jinguoduanju.app"
-        self.tgGroup = "https://t.me/+3t5XRPPo9mlkZDRl"
-        self.brandActor = "📺TG群: https://t.me/+3t5XRPPo9mlkZDRl"
-        self.brandDirector = "📺ZakaTV"
-        self.brandName = "ZakaTV"
+        self.tgGroup = "https://t.me/tvshare23"
+        self.brandActor = "🦋 TG群: @tvshare23"
+        self.brandDirector = "🦋 蝴蝶影视"
+        self.brandName = "蝴蝶影视"
         self.cardStyle = {"type": "rect", "ratio": 0.75}
         self.pageSize = 24
         self._ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
