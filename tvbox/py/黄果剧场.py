@@ -1,36 +1,54 @@
-#!/usr/bin/env python3
-
+# -*- coding: utf-8 -*-
+"""
+@header({
+  searchable: 1,
+  filterable: 1,
+  quickSearch: 1,
+  title: '黄果剧场',
+  lang: 'hipy'
+})
+"""
 import sys
 import re
 import json
-import ssl
-import urllib.request
 import urllib.parse
-from urllib.parse import urlparse, quote, unquote, urljoin
-import http.cookiejar
-import gzip
-import zlib
+
+sys.path.append('..')
+try:
+    from base.spider import Spider as _B
+except ImportError:
+    class _B: pass
 
 try:
-    from base.spider import Spider as SpiderBase
+    import requests
+    from requests.packages.urllib3.exceptions import InsecureRequestWarning
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 except ImportError:
-    class SpiderBase(object):
-        pass
+    requests = None
 
+# 常量定义
+U = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-class Spider(SpiderBase):
+class Spider(_B):
     def init(self, extend=""):
+        self.s = requests.Session() if requests else None
+        if self.s:
+            self.s.headers.update({
+                "User-Agent": U,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Cookie": "hg_age=1"
+            })
+            self.s.verify = False
+
         self.siteName = "黄果剧场"
         self.siteUrl = "https://huangguo.video"
-        self.brandActor = "📺TG群: https://t.me/+3t5XRPPo9mlkZDRl"
-        self.brandDirector = "📺ZakaTV"
-        self._ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Mobile/15E148 Safari/604.1"
 
         self.categories = [
             {"type_id": "1", "type_name": "MV/音乐剧"},
             {"type_id": "2", "type_name": "短片"},
             {"type_id": "3", "type_name": "连续剧"},
-            {"type_id": "4", "type_name": "片段"}
+            {"type_id": "4", "type_name": "片段"},
         ]
 
         self.tag_options = [
@@ -42,20 +60,10 @@ class Spider(SpiderBase):
             {"n": "古风", "v": "7"},
             {"n": "乱伦", "v": "8"},
             {"n": "NTR", "v": "9"},
-            {"n": "玄幻", "v": "40"}
+            {"n": "玄幻", "v": "40"},
         ]
 
         self._play_url_cache = {}
-
-        self.ctx = ssl.create_default_context()
-        self.ctx.check_hostname = False
-        self.ctx.verify_mode = ssl.CERT_NONE
-
-        self.cj = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self.cj),
-            urllib.request.HTTPSHandler(context=self.ctx)
-        )
 
     def getName(self):
         return self.siteName
@@ -68,44 +76,21 @@ class Spider(SpiderBase):
         return False
 
     def destroy(self):
-        self._play_url_cache.clear()
+        pass
 
     def _http_get(self, url, referer=None):
-        if not url:
+        if not self.s:
             return ""
-        headers = {
-            "User-Agent": self._ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Referer": referer or (self.siteUrl + "/"),
-            "Cookie": "hg_age=1",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive"
-        }
+        headers = {}
+        headers["Referer"] = referer or (self.siteUrl + "/")
+            
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with self.opener.open(req, timeout=5) as resp:
-                raw = resp.read()
-                enc = resp.headers.get("Content-Encoding", "").lower()
-                if raw.startswith(b"\x1f\x8b") or enc == "gzip":
-                    raw = gzip.decompress(raw)
-                elif enc == "deflate":
-                    try:
-                        raw = zlib.decompress(raw)
-                    except Exception:
-                        raw = zlib.decompress(raw, -zlib.MAX_WBITS)
-                try:
-                    return raw.decode("utf-8")
-                except Exception:
-                    return raw.decode("latin1", errors="ignore")
-        except Exception:
-            return ""
-
-    def _format_remarks(self, parts_list):
-        clean_parts = [p.strip() for p in parts_list if p and p.strip()]
-        if not clean_parts:
-            return "ZakaTV"
-        return "ZakaTV · " + " · ".join(clean_parts)
+            r = self.s.get(url, headers=headers, timeout=15)
+            if r.status_code == 200:
+                return r.text
+        except Exception as e:
+            print(f'[黄果剧场] 请求失败 {url}: {e}')
+        return ""
 
     def _parse_list(self, html):
         if not html:
@@ -114,15 +99,21 @@ class Spider(SpiderBase):
         items = []
         seen = set()
 
+        # 兼容处理所有卡片样式 (video-card, search-content-card 等)
         for art in re.finditer(
-            r'<article class="(?:video-card|search-content-card)[^"]*">(.*?)</article>',
+            r'<article[^>]*class="[^"]*(?:video-card|search-content-card|card)[^"]*"[^>]*>(.*?)</article>',
             html, re.S
         ):
             block = art.group(1)
 
+            # 同时匹配 /video/ 和 /series/ 路由
             link_m = re.search(r'<a\s+href="(/(?:video|series)/[^"]+)"', block)
             if not link_m:
-                continue
+                # 兜底：尝试匹配任意带 href 的链接
+                link_m = re.search(r'href="(/(?:video|series)/[^"]+)"', block)
+                if not link_m:
+                    continue
+
             path = link_m.group(1).strip()
 
             if path.startswith('/video/'):
@@ -146,38 +137,62 @@ class Spider(SpiderBase):
                 title = alt_m.group(1).strip()
             if not title:
                 t_m = re.search(
-                    r'<p[^>]*class="[^"]*(?:text-cream|font-display)[^"]*"[^>]*>([^<]+)</p>',
+                    r'<p[^>]*class="[^"]*(?:text-cream|font-display|title)[^"]*"[^>]*>([^<]+)</p>',
                     block
                 )
                 if t_m:
                     title = t_m.group(1).strip()
 
             tag = ""
-            tag_m = re.search(
-                r'<span class="absolute bottom-2 right-2[^"]*">([^<]+)</span>', block)
+            tag_m = re.search(r'<span[^>]*class="[^"]*absolute[^"]*">([^<]+)</span>', block)
             if tag_m:
                 tag = tag_m.group(1).strip()
 
             sub = ""
-            sub_m = re.search(
-                r'<p class="mt-2[^"]*font-mono-meta[^"]*">(.*?)</p>', block, re.S)
+            sub_m = re.search(r'<p[^>]*class="[^"]*meta[^"]*">(.*?)</p>', block, re.S)
             if sub_m:
                 sub = re.sub(r'<[^>]+>', '', sub_m.group(1)).strip()
 
-            meta_parts = []
+            parts = []
             if tag:
-                meta_parts.append(tag)
+                parts.append(tag)
             if sub:
-                meta_parts.append(sub)
+                parts.append(sub)
 
             seen.add(vid)
             items.append({
                 "vod_id": vid,
-                "vod_name": title,
+                "vod_name": title or "未知剧集",
                 "vod_pic": cover,
-                "vod_remarks": self._format_remarks(meta_parts),
-                "style": {"type": "rect", "ratio": 0.75}
+                "vod_remarks": " · ".join(parts) if parts else "连续剧",
             })
+
+        # 如果标准 article 没抓到，尝试宽松抓取所有带有 /series/ 或 /video/ 的超链接卡片
+        if not items:
+            for m in re.finditer(r'<a\s+href="(/(?:series|video)/([^"]+))"[^>]*>(.*?)</a>', html, re.S):
+                path = m.group(1)
+                sub_path = m.group(2)
+                inner = m.group(3)
+                
+                vid = ('series:' if '/series/' in path else 'video:') + sub_path.strip('/')
+                if vid in seen:
+                    continue
+                
+                img_m = re.search(r'src="([^"]+)"', inner)
+                cover = img_m.group(1) if img_m else ""
+                if cover.startswith('/'):
+                    cover = self.siteUrl + cover
+                
+                title_m = re.search(r'alt="([^"]+)"', inner) or re.search(r'>([^<]+)</p>', inner)
+                title = title_m.group(1).strip() if title_m else sub_path
+                
+                seen.add(vid)
+                items.append({
+                    "vod_id": vid,
+                    "vod_name": title,
+                    "vod_pic": cover,
+                    "vod_remarks": "连续剧" if 'series' in path else "正片"
+                })
 
         return items
 
@@ -222,33 +237,26 @@ class Spider(SpiderBase):
         eps = []
         seen = set()
 
-        for m in re.finditer(
-            r'<a[^>]+class="[^"]*ep-chip[^"]*"[^>]+href="(/video/[^"]+)"[^>]*>([^<]+)</a>',
-            html
-        ):
+        # 宽松匹配连续剧选集列表链接
+        for m in re.finditer(r'<a[^>]+href="(/video/[^"]+)"([^>]*)>(.*?)</a>', html, re.S):
             path = m.group(1).strip()
-            name = m.group(2).strip()
+            inner_tag = m.group(2)
+            inner_text = m.group(3)
+            
             ep_id = path[len('/video/'):].strip('/')
             if ep_id in seen:
                 continue
+                
+            # 提取集数名称
+            name_m = re.search(r'>([^<]+)</p>', inner_text) or re.search(r'>([^<]+)</span>', inner_text)
+            if name_m:
+                name = name_m.group(1).strip()
+            else:
+                clean_text = re.sub(r'<[^>]+>', '', inner_text).strip()
+                name = clean_text if clean_text and len(clean_text) < 20 else f"第{len(eps) + 1}集"
+                
             seen.add(ep_id)
             eps.append({"name": name, "ep_id": ep_id, "url": self.siteUrl + path})
-
-        if not eps:
-            for m in re.finditer(
-                r'<a[^>]+href="(/video/[^"]+)"[^>]*class="[^"]*group[^"]*"[^>]*>(.*?)</a>',
-                html, re.S
-            ):
-                path = m.group(1).strip()
-                inner = m.group(2)
-                ep_id = path[len('/video/'):].strip('/')
-                if ep_id in seen:
-                    continue
-                nm = re.search(
-                    r'<p[^>]*class="[^"]*font-display[^"]*"[^>]*>([^<]+)</p>', inner)
-                name = nm.group(1).strip() if nm else ("第%d集" % (len(eps) + 1))
-                seen.add(ep_id)
-                eps.append({"name": name, "ep_id": ep_id, "url": self.siteUrl + path})
 
         return eps
 
@@ -282,16 +290,6 @@ class Spider(SpiderBase):
             elif line.endswith('.m3u8'):
                 sub_urls.append(base + '/' + line.lstrip('/'))
 
-        priority = ['720p', '1080p', '480p', '360p']
-
-        def score(u):
-            for i, p in enumerate(priority):
-                if p in u:
-                    return i
-            return 99
-
-        sub_urls.sort(key=score)
-
         for sub in sub_urls:
             sub_content = self._http_get(sub, referer=referer)
             if not sub_content:
@@ -299,28 +297,16 @@ class Spider(SpiderBase):
             m = re.search(r'https?://[^\s"\'<>\\]+\.mp4[^\s"\'<>\\]*', sub_content)
             if m:
                 return m.group(0)
-            sub_base = sub.rsplit('/', 1)[0]
-            for line in sub_content.split('\n'):
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                if '.mp4' in line:
-                    if line.startswith('http'):
-                        return line
-                    elif line.startswith('/'):
-                        return self.siteUrl + line
-                    else:
-                        return sub_base + '/' + line
         return ""
 
-    def homeContent(self, filter):
+    def homeContent(self, filter=False):
         filters = {
             "1": self._build_filters(),
             "2": self._build_filters(),
             "3": self._build_filters(),
             "4": self._build_filters(),
         }
-        return {"class": self.categories, "filters": filters}
+        return {"class": self.categories, "filters": filters if filter else {}}
 
     def _build_filters(self):
         return [
@@ -350,68 +336,45 @@ class Spider(SpiderBase):
         ]
 
     def homeVideoContent(self):
-        html = self._http_get(self.siteUrl + "/videos")
+        html = self._http_get(f"{self.siteUrl}/videos")
         items = self._parse_list(html)
         return {"list": items[:20]}
 
-    def categoryContent(self, tid, pg, filter, extend):
-        try:
-            page = max(1, int(pg or 1))
-        except (TypeError, ValueError):
-            page = 1
+    def categoryContent(self, tid, pg=1, filter=False, extend=None):
+        page = int(pg or 1)
+        extend = extend or {}
 
-        ext = {}
-        if isinstance(extend, dict):
-            ext = extend
-        elif isinstance(extend, str) and extend.strip():
-            try:
-                ext = json.loads(extend)
-            except Exception:
-                ext = {}
-
-        params = ["category=" + str(tid)]
-        if ext.get("rating"):
-            params.append("rating=" + str(ext["rating"]))
-        if ext.get("tags"):
-            params.append("tags=" + str(ext["tags"]))
-        if ext.get("sort"):
-            params.append("sort=" + str(ext["sort"]))
+        params = [f"category={tid}"]
+        if extend.get("rating"):
+            params.append(f"rating={extend['rating']}")
+        if extend.get("tags"):
+            params.append(f"tags={extend['tags']}")
+        if extend.get("sort"):
+            params.append(f"sort={extend['sort']}")
         if page > 1:
-            params.append("page=" + str(page))
+            params.append(f"page={page}")
 
-        url = self.siteUrl + "/videos?" + "&".join(params)
-
+        url = f"{self.siteUrl}/videos?" + "&".join(params)
         html = self._http_get(url)
         items = self._parse_list(html)
-
-        pagecount = page + 1 if items else page
-        m = re.search(r'共\s*(\d+)\s*部', html)
-        if m:
-            total = int(m.group(1))
-            page_size = 20
-            if total > 0:
-                pagecount = (total + page_size - 1) // page_size
 
         return {
             "list": items,
             "page": page,
-            "pagecount": pagecount,
+            "pagecount": page + 1 if items else page,
             "limit": 20,
             "total": 999,
         }
 
-    def searchContent(self, key, quick, pg="1"):
-        try:
-            page = max(1, int(pg or 1))
-        except (TypeError, ValueError):
-            page = 1
+    def searchContent(self, key, quick=False, pg=1):
+        page = int(pg or 1)
         kw = str(key or "").strip()
         if not kw:
-            return {"list": [], "page": page, "pagecount": 1, "limit": 20, "total": 0}
+            return {"list": [], "page": page, "pagecount": 1}
 
-        url = self.siteUrl + "/search?q=" + quote(kw)
+        url = f"{self.siteUrl}/search?q={urllib.parse.quote(kw)}"
         if page > 1:
-            url += "&page=" + str(page)
+            url += f"&page={page}"
 
         html = self._http_get(url)
         items = self._parse_list(html)
@@ -436,7 +399,7 @@ class Spider(SpiderBase):
         else:
             kind, real_id = 'video', raw
 
-        url = "%s/%s/%s" % (self.siteUrl, kind, real_id)
+        url = f"{self.siteUrl}/{kind}/{real_id}"
         html = self._http_get(url)
         if not html:
             return {"list": []}
@@ -445,15 +408,12 @@ class Spider(SpiderBase):
         pic = self._extract_cover(html)
         intro = self._extract_intro(html)
 
-        clean_pic = pic if (pic.startswith("http://") or pic.startswith("https://")) else ""
-
         play_urls = []
 
         if kind == 'series':
             eps = self._extract_episodes(html)
             for ep in eps:
-                clean_name = str(ep['name']).replace('$', '').replace('#', '')
-                play_urls.append("%s$%s" % (clean_name, ep['url']))
+                play_urls.append(f"{ep['name']}${ep['url']}")
         else:
             series_url = self._extract_series_url(html)
             if series_url:
@@ -461,53 +421,48 @@ class Spider(SpiderBase):
                 eps = self._extract_episodes(shtml)
                 if eps:
                     for ep in eps:
-                        clean_name = str(ep['name']).replace('$', '').replace('#', '')
-                        play_urls.append("%s$%s" % (clean_name, ep['url']))
+                        play_urls.append(f"{ep['name']}${ep['url']}")
+            if not play_urls:
+                eps = self._extract_episodes(html)
+                if eps:
+                    for ep in eps:
+                        play_urls.append(f"{ep['name']}${ep['url']}")
+
             if not play_urls:
                 vurl = self._extract_hls(html)
                 if vurl:
-                    play_urls.append("正片$%s" % vurl)
+                    play_urls.append(f"正片${vurl}")
                 else:
-                    play_urls.append("正片$%s" % url)
-
-        remarks = ("ZakaTV · 共%d集" % len(play_urls)) if play_urls else "ZakaTV"
+                    play_urls.append(f"正片${url}")
 
         return {
             "list": [{
                 "vod_id": raw,
                 "vod_name": title,
-                "vod_pic": clean_pic,
-                "vod_bg": clean_pic,
-                "vod_background": clean_pic,
-                "vod_banner": clean_pic,
-                "vod_actor": self.brandActor,
-                "vod_director": self.brandDirector,
+                "vod_pic": pic,
                 "vod_content": intro,
-                "vod_remarks": remarks,
-                "vod_play_from": "Zaka专线" if play_urls else "",
+                "vod_remarks": f"共{len(play_urls)}集" if play_urls else "正片",
+                "vod_play_from": "黄果" if play_urls else "",
                 "vod_play_url": "#".join(play_urls),
             }]
         }
 
-    def playerContent(self, flag, id, vipFlags):
+    def playerContent(self, flag, id, vipFlags=None):
         raw = str(id or "").strip()
         if not raw:
-            return {"parse": 0, "url": ""}
+            return {"parse": 1, "url": raw}
 
         if raw in self._play_url_cache:
             cached = self._play_url_cache[raw]
             return {
                 "parse": 0,
                 "url": cached,
-                "header": {
-                    "User-Agent": self._ua,
-                    "Referer": self.siteUrl + "/",
-                }
+                "header": {"User-Agent": U, "Referer": self.siteUrl + "/"}
             }
 
         final_url = ""
 
-        if raw.startswith('http') and '/video/' in raw and not self.isVideoFormat(raw):
+        if raw.startswith('http') and ('/video/' in raw or '/series/' in raw) and not self.isVideoFormat(raw):
             html = self._http_get(raw)
             master = self._extract_hls(html)
             if master:
@@ -515,16 +470,12 @@ class Spider(SpiderBase):
                 if mp4:
                     final_url = mp4
                 else:
-                    play_stream = master
-                    if ".m3u8" not in play_stream.lower() and ".mp4" not in play_stream.lower():
-                        sep = "&" if "?" in play_stream else "?"
-                        play_stream = play_stream + sep + "format=.m3u8"
-                    self._play_url_cache[raw] = play_stream
+                    self._play_url_cache[raw] = master
                     return {
                         "parse": 0,
-                        "url": play_stream,
+                        "url": master,
                         "header": {
-                            "User-Agent": self._ua,
+                            "User-Agent": U,
                             "Referer": raw,
                             "Origin": self.siteUrl,
                             "Cookie": "hg_age=1",
@@ -536,15 +487,11 @@ class Spider(SpiderBase):
             if mp4:
                 final_url = mp4
             else:
-                play_stream = raw
-                if ".m3u8" not in play_stream.lower() and ".mp4" not in play_stream.lower():
-                    sep = "&" if "?" in play_stream else "?"
-                    play_stream = play_stream + sep + "format=.m3u8"
                 return {
                     "parse": 0,
-                    "url": play_stream,
+                    "url": raw,
                     "header": {
-                        "User-Agent": self._ua,
+                        "User-Agent": U,
                         "Referer": self.siteUrl + "/",
                         "Cookie": "hg_age=1",
                     }
@@ -554,34 +501,22 @@ class Spider(SpiderBase):
             final_url = raw
 
         if final_url:
-            if ".m3u8" not in final_url.lower() and ".mp4" not in final_url.lower():
-                sep = "&" if "?" in final_url else "?"
-                final_url = final_url + sep + "format=.m3u8"
             self._play_url_cache[raw] = final_url
             return {
                 "parse": 0,
                 "url": final_url,
-                "header": {
-                    "User-Agent": self._ua,
-                    "Referer": self.siteUrl + "/",
-                }
+                "header": {"User-Agent": U, "Referer": self.siteUrl + "/"}
             }
 
         return {
-            "parse": 0,
+            "parse": 1,
             "url": raw,
             "header": {
-                "User-Agent": self._ua,
+                "User-Agent": U,
                 "Referer": self.siteUrl + "/",
                 "Cookie": "hg_age=1",
             }
         }
 
-    def localProxy(self, params):
-        return [404, "text/plain; charset=utf-8", b"Proxy not configured"]
-
-    def liveContent(self):
-        return ""
-
-    def action(self, action):
-        return {"msg": "ok"}
+    def localProxy(self, param):
+        pass
